@@ -17,6 +17,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from scipy.spatial.distance import cdist
 from sklearn.metrics import precision_score, recall_score
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from datasets import load_dataset
 
 import formula as FM
 import settings
@@ -28,6 +30,10 @@ import data.analysis
 
 
 GLOBALS = {}
+
+MODEL_PATH = "models/roberta_snli_finetuned"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+activations = []
 
 
 def save_with_acts(preds, acts, fname):
@@ -691,17 +697,29 @@ def to_sentence(toks, feats, dataset, tok_feats_vocab=None):
 
     return token_masks, tok_feats_vocab
 
+def hook(module, input, output):
+    activations.append(output.detach().cpu())
+
+def preprocess_function(examples):
+    return tokenizer(examples["premise"], examples["hypothesis"], truncation=True)
 
 def main():
     os.makedirs(settings.RESULT, exist_ok=True)
 
     print("Loading model/vocab")
-    model, dataset = data.snli.load_for_analysis(
-        settings.MODEL,
-        settings.DATA,
-        model_type=settings.MODEL_TYPE,
-        cuda=settings.CUDA,
-    )
+
+    model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH)
+
+    dataset = load_dataset("dataset", split="validation")
+    dataset = dataset.filter(lambda example: example["label"] != -1)
+    dataset = dataset.map(preprocess_function, batched=True)
+    dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
+
+    model.eval()
+
+    model.roberta.encoder.layer[11].output.dense.register_forward_hook(hook)
+
+    # TODO: edit below
 
     # Last model weight
     if settings.MODEL_TYPE == "minimal":
