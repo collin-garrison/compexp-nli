@@ -404,65 +404,35 @@ def pad_collate(batch, sort=True):
     return src_pad, src_feats_pad, src_multifeats_pad, src_len, idx
 
 
-def pairs(x):
-    """
-    (max_len, batch_size, *feats)
-    -> (max_len, batch_size / 2, 2, *feats)
-    """
-    if x.ndim == 1:
-        return x.unsqueeze(1).view(-1, 2)
-    else:
-        return x.unsqueeze(2).view(x.shape[0], -1, 2, *x.shape[2:])
-
-
-def extract_features(
-    model,
-    dataset,
-):
-    loader = DataLoader(
-        dataset,
-        shuffle=False,
-        batch_size=32,
-        collate_fn=lambda batch: pad_collate(batch, sort=False),
-    )
+def extract_features(model, dataset):
+    loader = DataLoader(dataset, shuffle=False, batch_size=32)
 
     all_srcs = []
     all_states = []
-    all_feats = []
-    all_multifeats = []
     all_idxs = []
-    for src, src_feats, src_multifeats, src_lengths, idx in tqdm(loader):
-        #  words = dataset.to_text(src)
+    
+    for batch in tqdm(loader):
+        
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
+
         if settings.CUDA:
-            src = src.cuda()
-            src_lengths = src_lengths.cuda()
-        # Memory bank - hidden states for each step
+            input_ids = input_ids.cuda()
+            attention_mask = attention_mask.cuda()
+
         with torch.no_grad():
-            # Combine q/h pairs
-            src_one = src.squeeze(2)
-            src_one_comb = pairs(src_one)
-            src_lengths_comb = pairs(src_lengths)
+            model(input_ids=input_ids, attention_mask=attention_mask)
 
-            s1 = src_one_comb[:, :, 0]
-            s1len = src_lengths_comb[:, 0]
+        for a in activations:
+            all_states.extend(a[:,0,:].cpu().numpy())
 
-            s2 = src_one_comb[:, :, 1]
-            s2len = src_lengths_comb[:, 1]
+        activations.clear()
 
-            final_reprs = model.get_final_reprs(s1, s1len, s2, s2len)
+        all_srcs.extend(batch["input_ids"].cpu().numpy())
 
-        # Pack the sequence
-        all_srcs.extend(list(np.transpose(src_one_comb.cpu().numpy(), (1, 2, 0))))
-        all_feats.extend(
-            list(np.transpose(pairs(src_feats).cpu().numpy(), (1, 2, 0, 3)))
-        )
-        all_multifeats.extend(
-            list(np.transpose(pairs(src_multifeats).cpu().numpy(), (1, 2, 0, 3)))
-        )
-        all_states.extend(list(final_reprs.cpu().numpy()))
-        all_idxs.extend(list(pairs(idx).cpu().numpy()))
-
-    all_feats = {"onehot": all_feats, "multi": all_multifeats}
+    all_idxs = list(range(len(all_states)))
+    
+    all_feats = {"onehot": [], "multi": []}
 
     return all_srcs, all_states, all_feats, all_idxs
 
@@ -717,21 +687,14 @@ def main():
 
     model.eval()
 
-    model.roberta.encoder.layer[11].output.dense.register_forward_hook(hook)
+    model.roberta.encoder.layer[11].output.LayerNorm.register_forward_hook(hook)
 
-    # TODO: edit below
-
-    # Last model weight
-    if settings.MODEL_TYPE == "minimal":
-        weights = model.mlp.weight.t().detach().cpu().numpy()
-    else:
-        weights = model.mlp[-1].weight.t().detach().cpu().numpy()
+    weights = model.classifier.out_proj.weight.detach().cpu().numpy().T
 
     print("Extracting features")
-    toks, states, feats, idxs = extract_features(
-        model,
-        dataset,
-    )
+    toks, states, feats, idxs = extract_features(model, dataset)
+
+    # TODO: edit below
 
     print("Computing quantiles")
     acts = quantile_features(states)
